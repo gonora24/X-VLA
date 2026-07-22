@@ -187,6 +187,7 @@ class XVLA(PreTrainedModel):
         domain_id: torch.LongTensor,
         proprio: torch.Tensor,
         steps: int = 10,
+        noise: torch.Tensor = None,
     ) -> torch.Tensor:
         """
         Iterative denoising (linear schedule).
@@ -198,7 +199,11 @@ class XVLA(PreTrainedModel):
         B = input_ids.shape[0]
         D = self.action_space.dim_action
 
-        x1 = torch.randn(B, self.num_actions, D, device=proprio.device, dtype=proprio.dtype)
+        if noise is None:
+            x1 = torch.randn(B, self.num_actions, D, device=proprio.device, dtype=proprio.dtype)
+        else:
+            assert noise.shape == (B, self.num_actions, D)
+            x1 = noise
         action = torch.zeros_like(x1)
 
         steps = max(1, int(steps))
