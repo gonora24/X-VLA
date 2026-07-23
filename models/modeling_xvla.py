@@ -185,13 +185,15 @@ class XVLA(PreTrainedModel):
         proprio: torch.Tensor,
         noise: torch.Tensor,
         steps: int = 10,
+        *,
+        use_checkpoint: bool = False,
     ) -> torch.Tensor:
         """
         Iterative denoising from a precomputed VLM encoding (grad-enabled).
 
         Same linear schedule as ``generate_actions``, but does not run
         ``forward_vlm`` and is not wrapped in ``@torch.no_grad()`` so callers
-        can differentiate w.r.t. ``noise`` (e.g. ``torch.func.jacfwd``).
+        can differentiate w.r.t. ``noise``.
 
         Args:
             enc: output of ``forward_vlm`` (``vlm_features``, ``aux_visual_inputs``)
@@ -199,10 +201,15 @@ class XVLA(PreTrainedModel):
             proprio: [B, dim_proprio]
             noise: [B, num_actions, dim_action] — noisy action trajectory ``x1``
             steps: number of denoise steps
+            use_checkpoint: if True, wrap each transformer step in
+                ``torch.utils.checkpoint`` so reverse-mode AD does not keep all
+                step activations in memory.
 
         Returns:
             postprocessed actions [B, num_actions, dim_action]
         """
+        from torch.utils.checkpoint import checkpoint
+
         B = proprio.shape[0]
         D = self.action_space.dim_action
         assert noise.shape == (B, self.num_actions, D), (
@@ -211,18 +218,24 @@ class XVLA(PreTrainedModel):
         x1 = noise
         action = torch.zeros_like(x1)
 
-        steps = max(1, int(steps))
-        for i in range(steps, 0, -1):
-            t = torch.full((B,), i / steps, device=proprio.device, dtype=proprio.dtype)
-            x_t = x1 * t.view(-1, 1, 1) + action * (1 - t).view(-1, 1, 1)
+        def _step(action_in: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+            x_t = x1 * t.view(-1, 1, 1) + action_in * (1 - t).view(-1, 1, 1)
             proprio_m, x_t_m = self.action_space.preprocess(proprio, x_t)
-            action = self.transformer(
+            return self.transformer(
                 domain_id=domain_id,
                 action_with_noise=x_t_m,
                 proprio=proprio_m,
                 t=t,
                 **enc,
             )
+
+        steps = max(1, int(steps))
+        for i in range(steps, 0, -1):
+            t = torch.full((B,), i / steps, device=proprio.device, dtype=proprio.dtype)
+            if use_checkpoint:
+                action = checkpoint(_step, action, t, use_reentrant=False)
+            else:
+                action = _step(action, t)
         return self.action_space.postprocess(action)
 
     @torch.no_grad()
