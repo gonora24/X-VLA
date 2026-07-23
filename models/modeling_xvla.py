@@ -178,6 +178,53 @@ class XVLA(PreTrainedModel):
         return self.action_space.compute_loss(pred_action, action)
 
     # ================================= inference =================================
+    def generate_actions_from_enc(
+        self,
+        enc: Dict[str, torch.Tensor],
+        domain_id: torch.LongTensor,
+        proprio: torch.Tensor,
+        noise: torch.Tensor,
+        steps: int = 10,
+    ) -> torch.Tensor:
+        """
+        Iterative denoising from a precomputed VLM encoding (grad-enabled).
+
+        Same linear schedule as ``generate_actions``, but does not run
+        ``forward_vlm`` and is not wrapped in ``@torch.no_grad()`` so callers
+        can differentiate w.r.t. ``noise`` (e.g. ``torch.func.jacfwd``).
+
+        Args:
+            enc: output of ``forward_vlm`` (``vlm_features``, ``aux_visual_inputs``)
+            domain_id: [B]
+            proprio: [B, dim_proprio]
+            noise: [B, num_actions, dim_action] — noisy action trajectory ``x1``
+            steps: number of denoise steps
+
+        Returns:
+            postprocessed actions [B, num_actions, dim_action]
+        """
+        B = proprio.shape[0]
+        D = self.action_space.dim_action
+        assert noise.shape == (B, self.num_actions, D), (
+            f"noise shape {tuple(noise.shape)} != {(B, self.num_actions, D)}"
+        )
+        x1 = noise
+        action = torch.zeros_like(x1)
+
+        steps = max(1, int(steps))
+        for i in range(steps, 0, -1):
+            t = torch.full((B,), i / steps, device=proprio.device, dtype=proprio.dtype)
+            x_t = x1 * t.view(-1, 1, 1) + action * (1 - t).view(-1, 1, 1)
+            proprio_m, x_t_m = self.action_space.preprocess(proprio, x_t)
+            action = self.transformer(
+                domain_id=domain_id,
+                action_with_noise=x_t_m,
+                proprio=proprio_m,
+                t=t,
+                **enc,
+            )
+        return self.action_space.postprocess(action)
+
     @torch.no_grad()
     def generate_actions(
         self,
@@ -204,21 +251,10 @@ class XVLA(PreTrainedModel):
         else:
             assert noise.shape == (B, self.num_actions, D)
             x1 = noise
-        action = torch.zeros_like(x1)
 
-        steps = max(1, int(steps))
-        for i in range(steps, 0, -1):
-            t = torch.full((B,), i / steps, device=proprio.device, dtype=proprio.dtype)
-            x_t = x1 * t.view(-1, 1, 1) + action * (1 - t).view(-1, 1, 1)
-            proprio_m, x_t_m = self.action_space.preprocess(proprio, x_t)
-            action = self.transformer(
-                domain_id=domain_id,
-                action_with_noise=x_t_m,
-                proprio=proprio_m,
-                t=t,
-                **enc,
-            )
-        return self.action_space.postprocess(action)
+        return self.generate_actions_from_enc(
+            enc, domain_id, proprio, x1, steps=steps
+        )
 
     # =============================== FastAPI service =============================
     def _build_app(self, processor):

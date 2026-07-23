@@ -162,10 +162,17 @@ class EE6DActionSpace(BaseActionSpace):
         return proprio_m, action_m
 
     def postprocess(self, action: torch.Tensor) -> torch.Tensor:
-        """Apply sigmoid to gripper logits."""
-        if action.size(-1) > max(self.gripper_idx):
-            action[..., self.gripper_idx] = torch.sigmoid(action[..., self.gripper_idx])
-        return action
+        """Apply sigmoid to gripper logits (out-of-place for autograd / jacfwd)."""
+        if action.size(-1) <= max(self.gripper_idx):
+            return action
+        parts = []
+        last = 0
+        for gi in self.gripper_idx:
+            parts.append(action[..., last:gi])
+            parts.append(torch.sigmoid(action[..., gi : gi + 1]))
+            last = gi + 1
+        parts.append(action[..., last:])
+        return torch.cat(parts, dim=-1)
 
 
 @register_action("joint")
@@ -207,10 +214,17 @@ class JointActionSpace(BaseActionSpace):
         return proprio_m, action_m
 
     def postprocess(self, action: torch.Tensor) -> torch.Tensor:
-        """Apply sigmoid to gripper logits."""
-        if action.size(-1) > max(self.gripper_idx):
-            action[..., self.gripper_idx] = torch.sigmoid(action[..., self.gripper_idx])
-        return action
+        """Apply sigmoid to gripper logits (out-of-place for autograd / jacfwd)."""
+        if action.size(-1) <= max(self.gripper_idx):
+            return action
+        parts = []
+        last = 0
+        for gi in self.gripper_idx:
+            parts.append(action[..., last:gi])
+            parts.append(torch.sigmoid(action[..., gi : gi + 1]))
+            last = gi + 1
+        parts.append(action[..., last:])
+        return torch.cat(parts, dim=-1)
 
 
 @register_action("agibot_ee6d")
